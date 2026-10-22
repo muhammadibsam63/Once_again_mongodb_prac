@@ -1,3 +1,4 @@
+
 {
   "name": "my-dashboard-app",
   "version": "1.0.0",
@@ -8,7 +9,7 @@
     "dev": "concurrently \"npm run server:dev\" \"npm run client:dev\"",
     "server:dev": "nodemon server.js",
     "client:dev": "npm --prefix web run dev",
-    "build": "npm --prefix web run build",
+    "build": "npm --prefix web install && npm --prefix web run build",
     "start": "node server.js",
     "install:all": "npm install && npm --prefix web install"
   },
