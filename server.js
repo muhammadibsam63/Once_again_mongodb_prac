@@ -1,7 +1,5 @@
 
 import express from 'express';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -13,21 +11,15 @@ import connectDB from './config/db.js';
 import authRoutes from './routes/authRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 
-// Load environment variables
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const app = express();
-const PORT = process.env.PORT || 5000;
 
-// Trust Vercel's proxy for correct client IP handling
 if (process.env.VERCEL) {
   app.set('trust proxy', 1);
 }
 
-// ---------- CORS CONFIGURATION ----------
+// ---------- CORS ----------
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
@@ -36,22 +28,24 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin(origin, callback) {
-    // Allow requests without Origin (e.g. server-to-server requests)
     if (!origin || allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
 
-    console.warn('CORS blocked origin:', origin);
-    return callback(new Error('Origin not allowed by CORS'));
+    console.warn('Blocked CORS origin:', origin);
+    return callback(null, false);
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
+  optionsSuccessStatus: 204,
 };
 
+// CORS must run before security middleware and API routes
 app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
-// ---------- SECURITY MIDDLEWARE ----------
+// ---------- SECURITY ----------
 app.use(
   helmet({
     contentSecurityPolicy: false,
@@ -63,19 +57,20 @@ app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
 app.use(cookieParser());
 
-// ---------- RATE LIMITING ----------
-const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 200,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: {
-    success: false,
-    message: 'Too many requests. Please try again later.',
-  },
-});
-
-app.use('/api', generalLimiter);
+// ---------- RATE LIMIT ----------
+app.use(
+  '/api',
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 200,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+      success: false,
+      message: 'Too many requests. Please try again later.',
+    },
+  })
+);
 
 // ---------- API ROUTES ----------
 app.use('/api/auth', authRoutes);
@@ -83,68 +78,49 @@ app.use('/api/users', userRoutes);
 
 // ---------- HEALTH CHECK ----------
 app.get('/api/health', (req, res) => {
-  const dbState = mongoose.connection.readyState;
-
-  const dbStatus = {
+  const states = {
     0: 'disconnected',
     1: 'connected',
     2: 'connecting',
     3: 'disconnecting',
-  }[dbState] || 'unknown';
+  };
 
-  res.status(dbState === 1 ? 200 : 503).json({
-    success: dbState === 1,
+  const database = states[mongoose.connection.readyState] || 'unknown';
+  const connected = mongoose.connection.readyState === 1;
+
+  res.status(connected ? 200 : 503).json({
+    success: connected,
     status: 'ok',
     timestamp: new Date().toISOString(),
-    database: dbStatus,
+    database,
     environment: process.env.NODE_ENV || 'development',
   });
 });
 
-// ---------- API 404 HANDLER ----------
-app.use('/api', (req, res) => {
+// ---------- ROOT ----------
+app.get('/', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'Dashboard API is running',
+    health: '/api/health',
+  });
+});
+
+// ---------- 404 ----------
+app.use((req, res) => {
   res.status(404).json({
     success: false,
-    message: `API endpoint not found: ${req.method} ${req.originalUrl}`,
+    message: `Route ${req.method} ${req.originalUrl} not found.`,
   });
 });
 
-// ---------- FRONTEND STATIC HOSTING ----------
-const frontendPath = path.join(__dirname, 'web', 'build');
-
-app.use(express.static(frontendPath));
-
-// SPA fallback for non-API routes
-app.get('*', (req, res, next) => {
-  if (req.originalUrl.startsWith('/api')) {
-    return res.status(404).json({
-      success: false,
-      message: `API endpoint not found: ${req.method} ${req.originalUrl}`,
-    });
-  }
-
-  res.sendFile(path.join(frontendPath, 'index.html'), (err) => {
-    if (err) {
-      if (!res.headersSent) {
-        res.status(404).send(
-          'Frontend build not found. Please build the frontend first.'
-        );
-      }
-    }
-  });
-});
-
-// ---------- GLOBAL ERROR HANDLER ----------
+// ---------- ERROR HANDLER ----------
 app.use((err, req, res, next) => {
-  if (res.headersSent) {
-    return next(err);
-  }
+  if (res.headersSent) return next(err);
 
-  console.error('Unhandled error:', err.message);
+  console.error('Request error:', err.message);
 
-  const statusCode = err.status || 500;
-
-  res.status(statusCode).json({
+  res.status(err.status || 500).json({
     success: false,
     message:
       process.env.NODE_ENV === 'production'
@@ -153,20 +129,16 @@ app.use((err, req, res, next) => {
   });
 });
 
-// ---------- START SERVER ----------
-const startServer = async () => {
-  await connectDB();
+// Connect once when this module loads.
+// Vercel invokes the exported Express app; local development uses app.listen().
+await connectDB();
+
+if (!process.env.VERCEL) {
+  const PORT = process.env.PORT || 5000;
 
   app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`Frontend build path: ${frontendPath}`);
+    console.log(`API running at http://localhost:${PORT}`);
   });
-};
-
-startServer().catch((err) => {
-  console.error('Failed to start server:', err.message);
-  process.exit(1);
-});
+}
 
 export default app;
